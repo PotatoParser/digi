@@ -5,6 +5,7 @@ import (
 
 	"digi.dev/digi/cmd/digi/box"
 	"digi.dev/digi/cmd/digi/lake"
+	"digi.dev/digi/cmd/digi/net"
 	"digi.dev/digi/cmd/digi/sidecar"
 	"digi.dev/digi/cmd/digi/space"
 )
@@ -43,6 +44,10 @@ func init() {
 	RootCmd.AddCommand(digestCmd)
 	RootCmd.AddCommand(kindCmd)
 	RootCmd.AddCommand(rmkCmd)
+	RootCmd.AddCommand(exposeCmd)
+	exposeCmd.Flags().IntP("port", "p", 0, "port")
+	exposeCmd.Flags().IntP("targetPort", "t", 0, "targetPort")
+	exposeCmd.Flags().IntP("nodePort", "n", 0, "nodePort")
 	pullCmd.Flags().BoolP("local", "l", false, "Pull from local profiles")
 	pullCmd.Flags().StringP("group", "g", "", "Specifying kind group.")
 	pushCmd.Flags().BoolP("local", "l", false, "Push to local profiles")
@@ -61,7 +66,7 @@ func init() {
 	runCmd.Flags().IntP("log-level", "l", -1, "Logging level")
 	runCmd.Flags().StringP("deploy-file", "d", "cr.yaml", "Deployment file.")
 	runCmd.Flags().BoolP("persistent-volume", "p", false, "Enable persistent volume")
-	runCmd.Flags().String("pv-size", "10 Mi", "Persistent volume size")
+	runCmd.Flags().String("pv-size", "10Mi", "Persistent volume size")
 	runCmd.Flags().String("pv-path", "/mnt", "Persistent volume path")
 	runCmd.Flags().StringSlice("sidecar", []string{}, "List of sidecars to attach")
 	stopCmd.Flags().StringP("kind", "k", "", "Digi kind")
@@ -84,8 +89,15 @@ func init() {
 	editCmd.Flags().BoolP("all", "a", false, "Edit all attributes")
 
 	RootCmd.AddCommand(aliasCmd)
+	aliasCmd.AddCommand(aliasDiscoverCmd)
 	aliasCmd.AddCommand(aliasClearCmd)
 	aliasCmd.AddCommand(aliasResolveCmd)
+	aliasDiscoverCmd.Flags().BoolP("set", "s", false, "Set the aliases")
+
+	RootCmd.AddCommand(attachCmd)
+	attachCmd.Flags().BoolP("bash", "b", false, "Use bash in remote session")
+
+	RootCmd.AddCommand(connectCmd)
 
 	RootCmd.AddCommand(vizCmd)
 	RootCmd.AddCommand(sidecar.RootCmd)
@@ -95,4 +107,6 @@ func init() {
 	RootCmd.AddCommand(lake.QueryCmd)
 
 	RootCmd.AddCommand(box.RootCmd)
+
+	RootCmd.AddCommand(net.RootCmd)
 }

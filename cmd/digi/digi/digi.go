@@ -1,6 +1,7 @@
 package digi
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -9,11 +10,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"digi.dev/digi/api"
 	"digi.dev/digi/api/config"
+	"digi.dev/digi/api/k8s"
 	"digi.dev/digi/api/repo"
 	"digi.dev/digi/cmd/digi/helper"
 	"digi.dev/digi/pkg/core"
@@ -31,7 +38,7 @@ var (
 
 var configCmd = &cobra.Command{
 	Use:     "config",
-	Short:   "Configure the default parameters for Digi CLI",
+	Short:   "Configure the default parameters this cli",
 	Aliases: []string{"configure"},
 	Args:    cobra.ExactArgs(0),
 	Run: func(cmd *cobra.Command, args []string) {
@@ -568,6 +575,110 @@ var editCmd = &cobra.Command{
 	},
 }
 
+var exposeCmd = &cobra.Command{
+	Use:     "expose NAME",
+	Short:   "Expose a digi by creating a k8s nodeport",
+	Aliases: []string{"e"},
+	Args:    cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		name := args[0]
+
+		portFlag, _ := cmd.Flags().GetInt("port")
+		port := portFlag
+		targetPortFlag, _ := cmd.Flags().GetInt("targetPort")
+		targetPort := intstr.FromInt(targetPortFlag)
+		nodePortFlag, _ := cmd.Flags().GetInt("nodePort")
+
+		namespace := "default"
+
+		currAPIClient, err := api.NewClient()
+		if err != nil {
+			log.Fatalf("Error creating API Client\n")
+		}
+
+		//check if digi exists
+		currAuri, err := api.Resolve(name)
+
+		if err == nil && currAuri != nil {
+			json, _ := currAPIClient.GetModelJson(currAuri)
+			if len(json) <= 0 {
+				log.Fatalf("Digi %s does not exist\n", name)
+			}
+		}
+
+		k8sClientset, err := k8s.NewClientSet()
+		if err != nil {
+			log.Fatalf(err.Error())
+		}
+
+		//wait for digi's pod to be ready
+		wait.Poll(time.Second, 15*time.Second, func() (bool, error) {
+			podsInNS := k8sClientset.Clientset.CoreV1().Pods(namespace)
+			selectedPods, err := podsInNS.List(context.TODO(), metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)})
+			if err != nil {
+				log.Fatalf(err.Error())
+			}
+
+			for _, pod := range selectedPods.Items {
+				if pod.Status.Phase == v1.PodRunning {
+					return true, nil
+				}
+			}
+
+			return false, nil
+		})
+
+		//get the services in this namespace -- this will be used to create a NodePort later on
+		servicesInNs := k8sClientset.Clientset.CoreV1().Services(namespace)
+
+		//use the port and targetPort of the digi's service if not specified
+		if portFlag <= 0 || targetPortFlag <= 0 {
+			currService, err := servicesInNs.Get(context.TODO(), name, metav1.GetOptions{})
+
+			if err != nil {
+				log.Fatalf(err.Error())
+			}
+
+			if portFlag <= 0 {
+				port = int(currService.Spec.Ports[0].Port)
+			}
+
+			if targetPortFlag <= 0 {
+				targetPort = currService.Spec.Ports[0].TargetPort
+			}
+		}
+
+		//create a NodePort. If the --nodeport flag is not specified, setting the value we pass
+		//to k8s to 0 will cause it to pick a port on its own
+		passedNodePort := nodePortFlag
+
+		nodeportService := &v1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: fmt.Sprintf("%s-nodeport", name),
+			},
+			Spec: v1.ServiceSpec{
+				Selector: map[string]string{
+					"app": name,
+				},
+				Type: v1.ServiceTypeNodePort,
+				Ports: []v1.ServicePort{
+					{
+						Name:       fmt.Sprintf("%s-nodeport-ports", name),
+						Port:       int32(port),
+						TargetPort: targetPort,
+						NodePort:   int32(passedNodePort),
+					},
+				},
+			},
+		}
+
+		_, err = servicesInNs.Create(context.TODO(), nodeportService, metav1.CreateOptions{})
+		if err != nil {
+			log.Fatalf(err.Error())
+		}
+	},
+}
+
 var runCmd = &cobra.Command{
 	Use:   "run KIND NAME [NAME ...]",
 	Short: "Run a digi given kind and name",
@@ -801,7 +912,7 @@ var (
 		Args:  cobra.MaximumNArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(args) == 0 {
-				if err := api.ShowAll(); err != nil {
+				if err := api.ShowLocal(); err != nil {
 					log.Fatalln(err)
 				}
 				return
@@ -818,12 +929,31 @@ var (
 			}
 
 			a := &api.Alias{
-				Auri: &duri,
+				Duri: &duri,
 				Name: args[1],
 			}
 
 			if err := a.Set(); err != nil {
 				log.Fatalln("unable to set alias: ", err)
+			}
+		},
+	}
+	aliasDiscoverCmd = &cobra.Command{
+		Use:   "discover",
+		Short: "Discover aliases from the dSpace",
+		Run: func(cmd *cobra.Command, args []string) {
+			s, _ := cmd.Flags().GetBool("set")
+			if s {
+				if err := api.DiscoverAliasAndSet(); err != nil {
+					log.Fatalln("unable to discover and set alias: ", err)
+				}
+				return
+			}
+
+			if aliases, err := api.DiscoverAlias(); err != nil {
+				log.Fatalln("unable to discover aliases: ", err)
+			} else {
+				api.Show(aliases)
 			}
 		},
 	}
@@ -868,7 +998,9 @@ alias cache.
 		}
 		flags := ""
 		if !showAll {
-			flags += " -l app!=lake,app!=syncer,app!=emqx"
+			flags += " -l digi.dev/type=app"
+		} else {
+			flags += " -l digi.dev/type"
 		}
 		if len(args) == 0 {
 			_ = helper.RunMake(map[string]string{
@@ -929,6 +1061,43 @@ var watchCmd = &cobra.Command{
 		}
 
 		_ = helper.RunMake(params, "watch", true, false)
+	},
+}
+
+var attachCmd = &cobra.Command{
+	Use:     "attach NAME",
+	Short:   "Start a tty on the digi's driver",
+	Aliases: []string{"at"},
+	Args:    cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		useBash, _ := cmd.Flags().GetBool("bash")
+		params := map[string]string{
+			"NAME": args[0],
+		}
+		if useBash {
+			params["SHELL_BIN"] = "bash"
+		}
+		_ = helper.RunMake(params, "attach", true, false)
+	},
+}
+
+var connectCmd = &cobra.Command{
+	Use:     "connect NAME LOCAL [REMOTE]",
+	Short:   "Forward a local port to another of a digi",
+	Aliases: []string{"conn"},
+	Args:    cobra.MinimumNArgs(2),
+	Run: func(cmd *cobra.Command, args []string) {
+		var local, remote string
+		local = args[1]
+		if len(args) < 3 {
+			remote = local
+		}
+		params := map[string]string{
+			"NAME":   args[0],
+			"LOCAL":  local,
+			"REMOTE": remote,
+		}
+		_ = helper.RunMake(params, "connect", true, false)
 	},
 }
 

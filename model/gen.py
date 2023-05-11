@@ -166,6 +166,10 @@ properties:
     type: boolean
   pause:
     type: boolean
+  use_sourcer:
+    type: boolean
+  skip_history:
+    type: boolean
 type: object
 """
 
@@ -183,6 +187,8 @@ properties:
   driver_managed:
     type: boolean
   pause:
+    type: boolean
+  link:
     type: boolean
 type: object
 """
@@ -471,10 +477,7 @@ def gen(name):
 
         # generate a helm values.yaml if missing
         values_file = os.path.join(_dir_path, "deploy", "values.yaml")
-        # XXX enable safe gen option in command line
-        # if not os.path.exists(values_file):
-
-        if True:
+        if not os.path.exists(values_file):
             values = _helm_values.format(
                 group=model["group"],
                 version=model["version"],

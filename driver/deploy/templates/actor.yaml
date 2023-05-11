@@ -3,14 +3,20 @@ kind: Deployment
 metadata:
   name: {{ .Values.name }}
   namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.name }}
+    name: {{ .Values.name }}
+    digi.dev/type: app
 spec:
   replicas: 1
   selector:
     matchLabels:
+      app: {{ .Values.name }}
       name: {{ .Values.name }}
   template:
     metadata:
       labels:
+        app: {{ .Values.name }}
         name: {{ .Values.name }}
     spec:
       {{ if .Values.persistent_volume }}
@@ -82,6 +88,11 @@ spec:
             name: controller
         {{ end }}
         {{ end }}
+        - name: probe
+          image: dylanreimer/dnet.probe
+          ports:
+          - containerPort: 8534
+            name: probe
 
 ---
 
@@ -91,7 +102,7 @@ metadata:
   name: {{ .Values.name }}
   labels:
     name: {{ .Values.name }}
-    app: digi
+    digi.dev/type: app
 spec:
   ports:
   - port: 7534
@@ -106,5 +117,9 @@ spec:
     targetPort: 5353
     protocol: UDP
     name: mdns
+  - port: 8534
+    targetPort: 8534
+    protocol: TCP
+    name: probe
   selector:
     name: {{ .Values.name }}

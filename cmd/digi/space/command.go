@@ -1,10 +1,16 @@
 package space
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/spf13/cobra"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"digi.dev/digi/api"
 	"digi.dev/digi/api/k8s"
@@ -20,6 +26,8 @@ var (
 		"syncer":  true,
 		"mounter": true,
 		"emqx":    true,
+		"net":     true,
+		"sourcer": true,
 		// ...
 	}
 )
@@ -96,14 +104,19 @@ var startCmd = &cobra.Command{
 	Short:   "Start space controllers",
 	Aliases: []string{"init"},
 	Run: func(cmd *cobra.Command, args []string) {
+		registryFile, _ := cmd.Flags().GetString("registry-file")
+		params := map[string]string{
+			"CR": registryFile,
+		}
+
 		if len(args) == 0 {
-			_ = helper.RunMake(nil, "start-space", true, false)
+			_ = helper.RunMake(params, "start-space", true, false)
 		} else {
 			for _, name := range args {
 				if ok, _ := controllers[name]; !ok {
 					log.Fatalf("unknown controller: %s\n", name)
 				}
-				_ = StartController(name)
+				_ = StartControllerWithParams(params, name)
 			}
 		}
 	},
@@ -130,6 +143,10 @@ func StartController(name string) error {
 	return helper.RunMake(nil, "start-"+name, true, false)
 }
 
+func StartControllerWithParams(params map[string]string, name string) error {
+	return helper.RunMake(params, "start-"+name, true, false)
+}
+
 func StopController(name string) error {
 	return helper.RunMake(nil, "stop-"+name, true, false)
 }
@@ -140,29 +157,45 @@ var registerCmd = &cobra.Command{
 	Aliases: []string{"register"},
 	Args:    cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
+		// run a local proxy
+		_ = helper.RunMake(map[string]string{}, "register-space", true, false)
+
+		// Get current context
 		kc, err := k8s.LoadKubeConfig()
 		if err != nil {
 			log.Fatal("Failed to load config from Kube Config file.")
 		}
-		context := k8s.CurrentContext(kc)
-		if exists, err := k8s.ClusterExistsLocal(context); !exists || err != nil {
-			log.Fatal("Cluster for current context ", context, " not found.")
+		dspace := k8s.CurrentContext(kc)
+		if exists, err := k8s.ClusterExistsLocal(dspace); !exists || err != nil {
+			log.Fatal("Cluster for current context ", dspace, " not found.")
 		}
-		cluster := kc.Clusters[context]
-		apiserver := cluster.Server
-		user := kc.AuthInfos[context]
-		ca_crt := cluster.CertificateAuthority
-		client_crt := user.ClientCertificate
-		client_key := user.ClientKey
-		_ = helper.RunMake(map[string]string{
-			"ADDR":       args[0],
-			"USER":       args[1],
-			"APISERVER":  apiserver,
-			"CONTEXT":    context,
-			"CA.CRT":     ca_crt,
-			"CLIENT.CRT": client_crt,
-			"CLIENT.KEY": client_key,
-		}, "register-space", true, false)
+
+		// Create Kubernetes clientset
+		clientset, err := k8s.NewClientSet()
+		if err != nil {
+			log.Fatal("Error creating Kubernetes clientset: %s\n", err.Error())
+			os.Exit(1)
+		}
+		res := clientset.DynamicClient.Resource(
+			schema.GroupVersionResource{
+				Group:    "message.digi.dev",
+				Version:  "v1",
+				Resource: "proxies",
+			},
+		).Namespace("default")
+
+		// get proxy model and update registry parameters
+		cr, err := res.Get(context.TODO(), "proxy", metav1.GetOptions{})
+		if err != nil {
+			log.Fatal("Proxy digi is not currently running\n", err.Error())
+		}
+		unstructured.SetNestedField(cr.Object, dspace, "spec", "meta", "dspace_name")
+		unstructured.SetNestedField(cr.Object, args[0], "spec", "meta", "registry_endpoint")
+		unstructured.SetNestedField(cr.Object, args[1], "spec", "meta", "user_name")
+		_, err = res.Update(context.TODO(), cr, metav1.UpdateOptions{})
+		if err != nil {
+			log.Fatal("Failed to update proxy digi\n", err.Error())
+		}
 	},
 }
 
@@ -203,9 +236,9 @@ var checkCmd = &cobra.Command{
 }
 
 var switchCmd = &cobra.Command{
-	Use:     "checkout NAME",
+	Use:     "use NAME",
 	Short:   "Switch to a digi space",
-	Aliases: []string{"checkout", "c", "switch"},
+	Aliases: []string{"checkout", "u", "switch"},
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		// TBD switch should take care of local alias cache, e.g., per
@@ -215,6 +248,98 @@ var switchCmd = &cobra.Command{
 			"NAME": args[0],
 		}, "switch-space", true, false)
 	},
+}
+
+var addCmd = &cobra.Command{
+	Use:   "add CONFIG",
+	Short: "Add a digi space from given config file",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		force, _ := cmd.Flags().GetBool("force")
+		root, err := k8s.LoadKubeConfig()
+		if err != nil {
+			log.Fatal("Failed to load config from root Kube Config file.")
+		}
+
+		given, err := k8s.LoadKubeConfig(args[0])
+		if err != nil {
+			log.Fatal("Failed to load config from the given Kube Config file.")
+		}
+
+		if !force {
+			// check if the clusters in the give config already exist in the root config
+			rootClusters := k8s.Clusters(root)
+			for _, cluster := range k8s.Clusters(given) {
+				if contains(rootClusters, cluster) {
+					log.Fatal("Cluster ", cluster, " already exists in the root; rename or use -f.")
+				}
+			}
+
+			// check if the contexts in the given config already exists in the root config
+			rootContexts := k8s.Contexts(root)
+			for _, context := range k8s.Contexts(given) {
+				if contains(rootContexts, context) {
+					log.Fatal("Context ", context, " already exists in the root; rename or use -f.")
+				}
+			}
+
+			// check if the user in the given config already exists in the root config
+			rootUsers := k8s.Users(root)
+			for _, user := range k8s.Users(given) {
+				if contains(rootUsers, user) {
+					log.Fatal("User ", user, " already exists in the root; rename or use -f.")
+				}
+			}
+		}
+
+		// merge the given config into the root config; root takes precedence
+		merged, err := k8s.MergeKubeConfigs(root, given)
+		if err != nil {
+			log.Fatal("Failed to merge Kube Config files.")
+		}
+
+		if err = k8s.WriteKubeConfig(merged); err != nil {
+			log.Fatal("Failed to write merged Kube Config file.")
+		}
+	},
+}
+
+// delete a space from the root config
+var deleteCmd = &cobra.Command{
+	Use:     "delete NAME",
+	Short:   "Delete a digi space from local access",
+	Aliases: []string{"del", "remove"},
+	Args:    cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		root, err := k8s.LoadKubeConfig()
+		if err != nil {
+			log.Fatal("Failed to load config from root Kube Config file.")
+		}
+
+		// check if the space exists in the root config
+		if !contains(k8s.Contexts(root), args[0]) {
+			log.Fatal("Space ", args[0], " does not exist in the root.")
+		}
+
+		// delete the space from the root config
+		err = k8s.DeleteKubeConfig(root, args[0])
+		if err != nil {
+			log.Fatal("Failed to delete space ", args[0], " from the root.")
+		}
+
+		if err = k8s.WriteKubeConfig(root); err != nil {
+			log.Fatal("Failed to write merged Kube Config file.")
+		}
+	},
+}
+
+func contains(strs []string, str string) bool {
+	for _, s := range strs {
+		if s == str {
+			return true
+		}
+	}
+	return false
 }
 
 var aliasCmd = &cobra.Command{
@@ -233,23 +358,6 @@ var aliasCmd = &cobra.Command{
 	},
 }
 
-var connectCmd = &cobra.Command{
-	Use:     "connect NAME",
-	Short:   "Start a tty on the digi's driver",
-	Aliases: []string{"conn", "c"},
-	Args:    cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		useBash, _ := cmd.Flags().GetBool("bash")
-		params := map[string]string{
-			"NAME": args[0],
-		}
-		if useBash {
-			params["SHELL_BIN"] = "bash"
-		}
-		_ = helper.RunMake(params, "connect", true, false)
-	},
-}
-
 var gcCmd = &cobra.Command{
 	Use:     "gc",
 	Short:   "Run garbage collection",
@@ -264,6 +372,7 @@ func init() {
 	log.SetFlags(0)
 	// TBD delete digi space removes all running digis and controllers
 	RootCmd.AddCommand(startCmd)
+	startCmd.Flags().StringP("registry-file", "f", "cr.yaml", "Specify a file containing registry data")
 	RootCmd.AddCommand(stopCmd)
 
 	RootCmd.AddCommand(MountCmd)
@@ -280,10 +389,10 @@ func init() {
 	RootCmd.AddCommand(listCmd)
 	RootCmd.AddCommand(checkCmd)
 	RootCmd.AddCommand(switchCmd)
+	RootCmd.AddCommand(addCmd)
+	addCmd.Flags().BoolP("force", "f", false, "Force add space, ignoring conflicts")
+	RootCmd.AddCommand(deleteCmd)
 	RootCmd.AddCommand(aliasCmd)
-	// TBD promote connect to digi root
-	RootCmd.AddCommand(connectCmd)
 	RootCmd.AddCommand(gcCmd)
 	listCmd.Flags().BoolP("current", "c", false, "List current space")
-	connectCmd.Flags().BoolP("bash", "b", false, "Use bash in remote session")
 }

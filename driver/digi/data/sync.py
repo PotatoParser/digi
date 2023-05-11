@@ -1,6 +1,6 @@
 import os
 import time
-import datetime
+from datetime import datetime, timezone
 import threading
 import typing
 import requests
@@ -30,6 +30,7 @@ class Sync(threading.Thread):
                  owner: str = "sync",  # commit author
                  lake_url: str = default_lake_url,
                  client: zed.Client = None,
+                 min_ts: datetime = datetime.min.replace(tzinfo=timezone.utc),
                  ):
         assert len(sources) > 0 and dest != ""
         self.sources = self._normalize(sources)
@@ -46,6 +47,7 @@ class Sync(threading.Thread):
         self.client = zed.Client(base_url=lake_url) if client is None else client
         self.source_ts = self._fetch_source_ts()  # track {source: max(ts)}
         self.source_pool_ids = self._fetch_source_pool_ids()
+        self.min_ts = min_ts  # min ts to sync
         self.source_set = set(self.sources)
         self.query_str = self._make_query()
 
@@ -86,7 +88,7 @@ class Sync(threading.Thread):
                 else:
                     self.source_ts[source] = max(max_ts, self.source_ts[source])
             else:
-                self.source_ts[source] = datetime.datetime.min
+                self.source_ts[source] = self.min_ts
         return records
 
     def load(self, records: list):
@@ -123,7 +125,7 @@ class Sync(threading.Thread):
     def _make_query(self) -> str:
         in_str = "from (\n"
         for source in self.sources:
-            cur_ts = self.source_ts.get(source, datetime.datetime.min)
+            cur_ts = max(self.source_ts.get(source, self.min_ts), self.min_ts)
             filter_flow = f"ts > {zjson.encode_datetime(cur_ts)} |" \
                 if self.eoio else ""
             patch_source_flow = f"put from := '{source}' |" \
@@ -156,6 +158,7 @@ class Sync(threading.Thread):
                 r["branch"] for r in self.client.query(branch_flow)
         ):
             return source_ts
+
         meta_flow = f"from {self.dest}:log | " \
                     f"typeof(this)==<Commit> | " \
                     f"over meta | " \
@@ -208,9 +211,12 @@ class Watch(Sync):
     """A destination-less sync that runs a UDF in once()."""
 
     def __init__(self, fn: typing.Callable,
-                 source_ts=None, *args, **kwargs):
+                 source_ts=None,
+                 min_ts=datetime.min.replace(tzinfo=timezone.utc),
+                 *args, **kwargs):
         self.fn = fn
         self.source_ts = source_ts
+        self.min_ts = min_ts
 
         super().__init__(dest="none", *args, **kwargs)
 
@@ -219,7 +225,7 @@ class Watch(Sync):
 
     def _fetch_source_ts(self) -> dict:
         if self.source_ts is None:
-            return defaultdict(lambda: datetime.datetime.min)
+            return defaultdict(lambda: self.min_ts)
         else:
             return self.source_ts
 

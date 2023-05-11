@@ -1,7 +1,6 @@
 import sys
 import json
 import threading
-import datetime
 from abc import ABC, abstractmethod
 from typing import List, Callable
 
@@ -9,6 +8,7 @@ import digi
 from digi.data import logger, zjson
 from digi.data import sync
 from digi.data import router
+from digi.data import util
 
 
 class Pool(ABC):
@@ -25,15 +25,6 @@ class Pool(ABC):
     def query(self, query: str):
         raise NotImplementedError
 
-    @abstractmethod
-    def watch(self, once: Callable, *,
-              branch: str = "main"):
-        raise NotImplementedError
-
-    @abstractmethod
-    def create_branch_if_not_exist(self, query: str):
-        raise NotImplementedError
-
 
 class ZedPool(Pool):
     def __init__(self, name):
@@ -45,7 +36,7 @@ class ZedPool(Pool):
              encoding="zjson",
              same_type=False):
         # update event and processing time
-        now = datetime.datetime.now()
+        now = util.now()
         if encoding == "zjson":
             for o in objects:
                 # event_ts will be attached at the first
@@ -74,8 +65,8 @@ class ZedPool(Pool):
                              meta=meta)
             # TBD load from digi also commits source ts in meta
         except Exception as e:
-            digi.logger.warning(f"unable to load "
-                                f"{data} to {self.name}: {e}")
+            logger.warning(f"unable to load "
+                           f"{data} to {self.name}: {e}")
         finally:
             self.lock.release()
 
@@ -85,12 +76,14 @@ class ZedPool(Pool):
         query = f"from {self.name} {query}"
         return self.client.query(query)
 
-    def watch(self, fn: Callable, *,
+    def watch(self, fn: Callable,
+              branch: str = "main",
+              *,
               in_flow: str = "",
               eoio: bool = True,
               ):
         """Watch changes of the main pool and run UDF."""
-        source = f"{self.name}@main"
+        source = f"{self.name}@{branch}"
         return sync.Watch(fn,
                           sources=[source],
                           eoio=eoio,
@@ -100,6 +93,7 @@ class ZedPool(Pool):
         if not self.client.branch_exist(self.name, branch):
             self.client.create_branch(self.name, branch)
             self.load([router.Egress.INIT], branch=branch)
+            logger.info(f"load {router.Egress.INIT} to {self.name}@{branch}")
 
 
 def pool_name(g, v, r, n, ns):

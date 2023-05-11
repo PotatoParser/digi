@@ -38,7 +38,8 @@ digi_src := $(GOPATH)/src/digi.dev/digi
 driver_dir := $(digi_src)/driver
 driver_handler := $(WORKDIR)/$(PROFILE)/driver/*
 digi_config := $(WORKDIR)/$(PROFILE)/deploy/*
-build_dir := /tmp/digi-build-$(PROFILE_NAME)-$(NAME)
+build_dir := /tmp/digi-build-$(PROFILE_NAME)
+test_dir := /tmp/digi-test-$(PROFILE_NAME)
 
 # model
 .PHONY: init gen model all delete delete-all profile proflie-local list
@@ -82,13 +83,16 @@ edit-all:
 .PHONY: clean-test start-test test
 clean-test: delete-pool conn-lake-stop
 	kubectl delete $(PLURAL).$(VERSION).$(GROUP) $(NAME) >/dev/null 2>&1 || true
+	rm -r $(test_dir) >/dev/null 2>&1 || true
 start-test: | all conn-lake-bg
-	kubectl apply -f $(WORKDIR)/$(KIND)/test/cr.yaml && \
+	mkdir -p $(test_dir) && \
+	rsync -r $(WORKDIR)/$(KIND)/ $(test_dir)/ || true && \
+	kubectl apply -f $(test_dir)/test/cr.yaml && \
 	(kubectl exec `kubectl get pod --field-selector status.phase=Running -l app=lake -oname` \
     -- bash -c "zed create $(NAME)") >/dev/null && echo $(NAME) || (echo "unable to create pool $(NAME); is lake running?"; exit 1) && \
-	cd $(WORKDIR) && GROUP=$(GROUP) VERSION=$(VERSION) KIND=$(KIND) \
+	cd $(test_dir) && GROUP=$(GROUP) VERSION=$(VERSION) KIND=$(KIND) \
     PLURAL=$(PLURAL) NAME=$(NAME) NAMESPACE=$(NAMESPACE) MOUNTER=$(MOUNTER) LAKE_PROVIDER=zed \
-	python $(PROFILE)/driver/handler.py
+	python ./driver/handler.py
 test: | clean-test start-test clean-test
 
 # driver
@@ -112,7 +116,7 @@ override ARCH = ARCH_TEMP
 endif
 build: | gen prepare
 	# use DOCKER_BUILDKIT=0 to enable more messages
-	rsync $(driver_handler) $(build_dir)/ || true
+	rsync -r $(driver_handler) $(build_dir)/ || true
 	cd $(build_dir) && $(DOCKER_CMD) buildx build -t $(DRIVER_REPO)/$(PROFILE_NAME):$(ARCH) $(BUILDFLAG) -f $(DOCKERFILE) . || true
 	$(DOCKER_CMD) push $(DRIVER_REPO)/$(PROFILE_NAME):$(ARCH) $(PUSHFLAG) || true
 	rm -r $(build_dir) || true
@@ -182,6 +186,7 @@ stop: | delete-pool
 	kubectl delete clusterrole $(NAME) >/dev/null || true & \
 	kubectl delete clusterrolebinding $(NAME) >/dev/null || true & \
 	kubectl delete service $(NAME) >/dev/null || true & \
+	kubectl delete service $(NAME)-nodeport >/dev/null || true & \
 	((kubectl delete $(PLURAL) $(NAME) >/dev/null || \
 	kubectl delete $(PLURAL).$(VERSION).$(GROUP) $(NAME)) >/dev/null || true) & \
 	kubectl delete deployment $(NAME) >/dev/null && \
@@ -204,9 +209,11 @@ watch:
 ifndef SHELL_BIN
 override SHELL_BIN = sh
 endif
-.PHONY: connect
-connect:
+.PHONY: attach connect
+attach:
 	kubectl exec -it `kubectl get pod --field-selector status.phase=Running -l name=$(NAME) -oname` -- /bin/$(SHELL_BIN)
+connect:
+	kubectl port-forward service/$(NAME) $(LOCAL):$(REMOTE)
 
 # lake
 ifndef LAKENAME
@@ -233,6 +240,12 @@ delete-pool:
 	kubectl exec `kubectl get pod --field-selector status.phase=Running -l app=lake -oname` \
     -- bash -c "zed drop -f $(NAME) >/dev/null 2>&1" || true
 
+.PHONY: start-sourcer stop-sourcer
+start-sourcer:
+	WORKDIR=$(DIGIHOME) digi run space/sourcer sourcer -d $(CR)
+stop-sourcer:
+	digi stop sourcer
+
 # syncer
 .PHONY: start-syncer stop-syncer
 start-syncer:
@@ -255,12 +268,19 @@ start-emqx:
 stop-emqx:
 	digi stop emqx
 
+# net/headscale
+.PHONY: start-net stop-net
+start-net:
+	WORKDIR=$(DIGIHOME) digi run net/headscale net
+stop-net:
+	digi stop net
+
 .PHONY: start-space stop-space
 start-space: | start-lake # ...
 stop-space: | stop-lake
 .PHONY: register-space list-space switch-space rename-space show-space
 register-space:
-	./register-space.sh $(ADDR) $(USER) $(APISERVER) $(CONTEXT) $(CA.CRT) $(CLIENT.CRT) $(CLIENT.KEY)
+	digi run message/proxy proxy
 list-space:
 	ctx $(FLAG)
 switch-space:
