@@ -1,9 +1,11 @@
 import websockets.sync.client
 import json
 import base64
+from typing import List
+from typing import TypeVar, Iterable, Tuple, Union
 
 class Cluster:
-  def __init__(self, controller, cluster: int | str):
+  def __init__(self, controller, cluster: Union[str, int]):
     self.controller = controller
     self.cluster = cluster
 
@@ -23,14 +25,14 @@ class UndefinedCluster(Cluster):
   matter.cluster(999)[777]("payload", endpoints=2) -> chip-tool command-by-id 999 777 payload 1 2
   """
 
-  def raw_invoke(self, cmd: str, payload, endpoints: list[str | int] | str | int, debug: bool):
+  def raw_invoke(self, cmd: str, payload, endpoints: Union[List[Union[str, int]], Union[str, int]], debug: bool):
     endpoints = endpoints if type(endpoints) == list else [endpoints]
     endpoints = map(lambda e: str(e), endpoints)
     endpoints = ','.join(endpoints)
     return self.controller.raw_invoke(f"any {cmd.replace('_', '-')} {self.cluster} {payload} {self.controller.node_id} {endpoints}", debug=debug)
 
   def __getattr__(self, cmd):
-      def dynamic_method(payload: str = "", endpoints: list[str | int] | str | int = "0xFFFF", debug=False):
+      def dynamic_method(payload: str = "", endpoints: Union[List[Union[str, int]], Union[str, int]] = "0xFFFF", debug=False):
         nonlocal cmd
         if type(cmd) != str:
           payload = f"{cmd} payload"
@@ -60,14 +62,14 @@ class DefinedCluster(Cluster):
   matter.cluster("onoff").read("on-off", endpoints=2) -> chip-tool onoff read on 1 2
   """
 
-  def raw_invoke(self, cmd: str, payload, endpoints: list[str | int] | str | int, debug: bool):
+  def raw_invoke(self, cmd: str, payload, endpoints: Union[List[Union[str, int]], Union[str, int]], debug: bool):
     endpoints = endpoints if type(endpoints) == list else [endpoints]
     endpoints = map(lambda e: str(e), endpoints)
     endpoints = ','.join(endpoints)
     return self.controller.raw_invoke(f"{self.cluster} {cmd.replace('_', '-')} {payload} {self.controller.node_id} {endpoints}", debug=debug)
 
   def __getattr__(self, cmd: str):
-      def dynamic_method(payload: str = "", endpoints: list[str | int] | str | int = "0xFFFF", debug=False):
+      def dynamic_method(payload: str = "", endpoints: Union[List[Union[str, int]], Union[str, int]] = "0xFFFF", debug=False):
         return self.raw_invoke(cmd, payload=payload, endpoints=endpoints, debug=debug)
       return dynamic_method
 
@@ -116,7 +118,7 @@ class Controller:
     """
     return self.raw_invoke(f"pairing code {self.node_id} {code} --bypass-attestation-verifier 1", debug=debug)
 
-  def cluster(self, cluster: int | str):
+  def cluster(self, cluster: Union[str, int]):
     """
     Return a cluster object. Invoking commands, reading, and writing involves the cluster
 
